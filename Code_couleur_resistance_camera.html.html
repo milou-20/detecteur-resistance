@@ -1,0 +1,264 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Resistor Color Code Detector (with OpenCV)</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <!-- 1. Include OpenCV.js -->
+    <script async src="https://docs.opencv.org/4.x/opencv.js" id="opencv-script"></script>
+    <style>
+        .bg-brown { background-color: #8B4513; }
+        .bg-red { background-color: #FF0000; }
+        .bg-orange { background-color: #FFA500; }
+        .bg-yellow { background-color: #FFFF00; }
+        .bg-green { background-color: #008000; }
+        .bg-blue { background-color: #0000FF; }
+        .bg-violet { background-color: #8A2BE2; }
+        .bg-gray { background-color: #808080; }
+        .bg-gold { background-color: #FFD700; }
+        .bg-silver { background-color: #C0C0C0; }
+
+        .color-band { height: 40px; width: 30px; border-radius: 2px; margin: 0 2px; transition: all 0.2s; border: 2px solid transparent; }
+        .resistor-body { background-color: #d1d5db; height: 60px; width: 200px; border-radius: 30px; position: relative; display: flex; align-items: center; justify-content: center; }
+        .resistor-lead { background-color: #9ca3af; height: 10px; width: 40px; }
+        #video, #canvas-output { width: 100%; max-width: 500px; border-radius: 10px; box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1); position: absolute; top: 0; left: 0; }
+        #canvas-output { z-index: 10; }
+        .video-container { position: relative; width: 100%; max-width: 500px; margin: 0 auto; aspect-ratio: 4 / 3; background-color:#333; border-radius:10px;}
+        #canvas-input, #canvas-debug { display: none; }
+    </style>
+</head>
+<body class="bg-gray-100 min-h-screen">
+    <div class="container mx-auto px-4 py-8">
+        <div class="max-w-4xl mx-auto bg-white rounded-xl shadow-md overflow-hidden p-6">
+            <h1 class="text-3xl font-bold text-center text-gray-800 mb-2">
+                <i class="fas fa-bolt mr-2 text-yellow-500"></i>
+                Resistor Color Code Detector
+            </h1>
+            <p id="status" class="text-center text-gray-500 mb-6">Waiting for OpenCV.js to load...</p>
+            
+            <div class="flex flex-col md:flex-row gap-8">
+                <!-- Camera Section -->
+                <div class="flex-1">
+                    <div class="bg-gray-800 rounded-lg p-4 mb-4">
+                        <div class="video-container">
+                            <video id="video" autoplay playsinline></video>
+                            <canvas id="canvas-output"></canvas>
+                            <canvas id="canvas-input"></canvas>
+                        </div>
+                         <div class="mt-4 flex justify-center">
+                            <button id="captureBtn" class="bg-blue-500 hover:bg-blue-600 text-white font-bold py-2 px-6 rounded-full shadow-lg flex items-center" disabled>
+                                <i class="fas fa-camera mr-2"></i> Analyze
+                            </button>
+                        </div>
+                    </div>
+                    <div id="analysis-result" class="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded relative hidden" role="alert">
+                      <strong class="font-bold">Error:</strong>
+                      <span class="block sm:inline" id="analysis-message">Could not detect a resistor.</span>
+                    </div>
+                </div>
+
+                <!-- Results Section -->
+                <div class="flex-1">
+                    <div class="bg-white p-6 rounded-lg border border-gray-200">
+                        <h2 class="text-xl font-semibold mb-4 text-gray-800">Resistor Value</h2>
+                        <div class="flex items-center justify-center mb-6">
+                            <div class="resistor-lead"></div>
+                            <div class="resistor-body flex justify-center">
+                                <div id="band1" class="color-band"></div><div id="band2" class="color-band"></div><div id="band3" class="color-band"></div><div id="band4" class="color-band"></div>
+                            </div>
+                            <div class="resistor-lead"></div>
+                        </div>
+                        <div class="bg-blue-50 p-4 rounded-lg">
+                            <div class="text-center">
+                                <p class="text-sm text-gray-600">Resistance Value:</p>
+                                <p id="resistanceValue" class="text-3xl font-bold text-blue-700">--</p>
+                                <p id="resistanceOhms" class="text-gray-500">-- Ohms</p>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+    document.addEventListener('DOMContentLoaded', () => {
+        const status = document.getElementById('status');
+        const captureBtn = document.getElementById('captureBtn');
+        const opencvScript = document.getElementById('opencv-script');
+
+        opencvScript.onload = () => {
+            if (cv) {
+                onOpenCvReady();
+            } else {
+                status.textContent = "Error: OpenCV.js failed to initialize.";
+                status.style.color = "red";
+            }
+        };
+
+        opencvScript.onerror = () => {
+             status.textContent = "Error: Could not load OpenCV.js script. Check network connection or ad-blockers.";
+             status.style.color = "red";
+        };
+
+        function onOpenCvReady() {
+            status.textContent = 'OpenCV loaded. Initializing camera...';
+            // --- Constants and Configuration ---
+            const colorMap = {
+                'black':  { value: 0, multiplier: 1,          tolerance: '',         rgb: [0, 0, 0] },
+                'brown':  { value: 1, multiplier: 10,         tolerance: '±1%',      rgb: [139, 69, 19] },
+                'red':    { value: 2, multiplier: 100,        tolerance: '±2%',      rgb: [255, 0, 0] },
+                'orange': { value: 3, multiplier: 1000,       tolerance: '',         rgb: [255, 165, 0] },
+                'yellow': { value: 4, multiplier: 10000,      tolerance: '',         rgb: [255, 255, 0] },
+                'green':  { value: 5, multiplier: 100000,     tolerance: '±0.5%',    rgb: [0, 128, 0] },
+                'blue':   { value: 6, multiplier: 1000000,    tolerance: '±0.25%',   rgb: [0, 0, 255] },
+                'violet': { value: 7, multiplier: 10000000,   tolerance: '±0.1%',    rgb: [138, 43, 226] },
+                'gray':   { value: 8, multiplier: 100000000,  tolerance: '±0.05%',   rgb: [128, 128, 128] },
+                'white':  { value: 9, multiplier: 1000000000, tolerance: '',         rgb: [255, 255, 255] },
+                'gold':   { value: -1, multiplier: 0.1,       tolerance: '±5%',      rgb: [255, 215, 0] },
+                'silver': { value: -1, multiplier: 0.01,      tolerance: '±10%',     rgb: [192, 192, 192] }
+            };
+            const colorNames = Object.keys(colorMap);
+
+            const video = document.getElementById('video');
+            const inputCanvas = document.getElementById('canvas-input');
+            const outputCanvas = document.getElementById('canvas-output');
+            const analysisResultDiv = document.getElementById('analysis-result');
+            const analysisMessage = document.getElementById('analysis-message');
+            const bandsUI = [document.getElementById('band1'), document.getElementById('band2'), document.getElementById('band3'), document.getElementById('band4')];
+            const resistanceValueUI = document.getElementById('resistanceValue');
+            const resistanceOhmsUI = document.getElementById('resistanceOhms');
+
+            async function initCamera() {
+                try {
+                    const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment", width: 640, height: 480 } });
+                    video.srcObject = stream;
+                    video.onloadedmetadata = () => {
+                        inputCanvas.width = outputCanvas.width = video.videoWidth;
+                        inputCanvas.height = outputCanvas.height = video.videoHeight;
+                        status.textContent = 'Ready to analyze.';
+                        captureBtn.disabled = false;
+                    };
+                } catch (err) {
+                    status.textContent = "Error: Could not access camera. Please grant permission and use HTTPS/localhost.";
+                    status.style.color = "red";
+                    console.error("Camera Error:", err);
+                }
+            }
+
+            captureBtn.addEventListener('click', analyzeImage);
+
+            function analyzeImage() {
+              try {
+                const inputCtx = inputCanvas.getContext('2d');
+                inputCtx.drawImage(video, 0, 0, inputCanvas.width, inputCanvas.height);
+                let src = cv.imread(inputCanvas);
+                let displayMat = src.clone();
+                let gray = new cv.Mat();
+                cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY);
+                cv.GaussianBlur(gray, gray, new cv.Size(7, 7), 0);
+                
+                let contours = new cv.MatVector();
+                let hierarchy = new cv.Mat();
+                cv.findContours(gray, contours, hierarchy, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
+
+                let maxArea = 0;
+                let resistorContour = null;
+                for (let i = 0; i < contours.size(); ++i) {
+                    let cnt = contours.get(i);
+                    let area = cv.contourArea(cnt);
+                    if (area > maxArea && area > 3000) {
+                        maxArea = area;
+                        resistorContour = cnt;
+                    }
+                }
+                
+                analysisResultDiv.classList.add('hidden');
+
+                if (resistorContour) {
+                    let rect = cv.boundingRect(resistorContour);
+                    cv.rectangle(displayMat, new cv.Point(rect.x, rect.y), new cv.Point(rect.x + rect.width, rect.y + rect.height), [0, 255, 0, 255], 2);
+
+                    const bandWidth = rect.width / 12;
+                    const bandHeight = rect.height * 0.6;
+                    const bandY = rect.y + (rect.height * 0.2);
+                    const bandPositions = [0.2, 0.35, 0.5, 0.75];
+
+                    let detectedColors = [];
+                    bandPositions.forEach(pos => {
+                        let bandX = rect.x + (rect.width * pos);
+                        let bandRect = new cv.Rect(bandX, bandY, bandWidth, bandHeight);
+                        cv.rectangle(displayMat, new cv.Point(bandRect.x, bandRect.y), new cv.Point(bandRect.x + bandRect.width, bandRect.y + bandRect.height), [255, 0, 0, 255], 2);
+                        
+                        let roi = src.roi(bandRect);
+                        let meanColor = cv.mean(roi);
+                        let colorName = findClosestColor(meanColor);
+                        detectedColors.push(colorName);
+                        roi.delete();
+                    });
+
+                    if (detectedColors[0] === 'gold' || detectedColors[0] === 'silver') {
+                        detectedColors.reverse();
+                    }
+
+                    updateUIWithColors(detectedColors);
+                } else {
+                    showError("Could not detect a resistor. Try a plain background and good lighting.");
+                    resetUI();
+                }
+
+                cv.imshow('canvas-output', displayMat);
+                src.delete(); displayMat.delete(); gray.delete(); contours.delete(); hierarchy.delete();
+                if(resistorContour) resistorContour.delete();
+              } catch (err) {
+                  showError("An error occurred during image analysis.");
+                  console.error("OpenCV Analysis Error:", err);
+              }
+            }
+            
+            function findClosestColor(rgb) {
+                let minDistance = Infinity;
+                let closestColorName = '';
+                colorNames.forEach(name => {
+                    const [r, g, b] = colorMap[name].rgb;
+                    const distance = Math.sqrt(Math.pow(r - rgb[0], 2) + Math.pow(g - rgb[1], 2) + Math.pow(b - rgb[2], 2));
+                    if (distance < minDistance) {
+                        minDistance = distance;
+                        closestColorName = name;
+                    }
+                });
+                return closestColorName;
+            }
+            
+            function showError(message) { analysisMessage.textContent = message; analysisResultDiv.classList.remove('hidden'); }
+            function resetUI() { bandsUI.forEach(band => band.className = 'color-band'); resistanceValueUI.textContent = '--'; resistanceOhmsUI.textContent = '-- Ohms'; }
+            
+            function updateUIWithColors(colors) {
+                colors.forEach((color, index) => { if (bandsUI[index]) { bandsUI[index].className = `color-band bg-${color}`; } });
+                calculateAndDisplayResistance(colors);
+            }
+
+            function calculateAndDisplayResistance(colors) {
+                if (colors.length < 4) return;
+                const [c1, c2, c3, c4] = colors;
+                const info1 = colorMap[c1], info2 = colorMap[c2], info3 = colorMap[c3], info4 = colorMap[c4];
+                if (info1.value === -1 || info2.value === -1) { showError('Invalid color sequence.'); resetUI(); return; }
+                const ohms = (info1.value * 10 + info2.value) * info3.multiplier;
+                const tolerance = info4.tolerance;
+                let displayValue;
+                if (ohms >= 1e9) displayValue = (ohms / 1e9).toPrecision(3) + 'GΩ';
+                else if (ohms >= 1e6) displayValue = (ohms / 1e6).toPrecision(3) + 'MΩ';
+                else if (ohms >= 1e3) displayValue = (ohms / 1e3).toPrecision(3) + 'kΩ';
+                else displayValue = ohms.toPrecision(3) + 'Ω';
+                resistanceValueUI.textContent = `${displayValue.replace(/\.0+$/, '')} ${tolerance}`;
+                resistanceOhmsUI.textContent = `${ohms.toLocaleString()} Ohms`;
+            }
+
+            initCamera();
+        }
+    });
+    </script>
+</body>
+</html>
